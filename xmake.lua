@@ -2,8 +2,8 @@
 includes("lib/commonlibsf")
 
 -- set project constants
-set_project("commonlibsf-template")
-set_version("0.0.0")
+set_project("SpeedSync")
+set_version("1.0.0")
 set_license("GPL-3.0")
 set_languages("c++23")
 set_warnings("allextra")
@@ -13,12 +13,12 @@ add_rules("mode.debug", "mode.releasedbg")
 add_rules("plugin.vsxmake.autoupdate")
 
 -- define targets
-target("commonlibsf-template")
+target("SpeedSync")
     add_rules("commonlibsf.plugin", {
-        name = "commonlibsf-template",
-        author = "libxse",
-        description = "SFSE plugin template using CommonLibSF",
-        email = "user@site.com"
+        name = "SpeedSync",
+        author = "litbeep",
+        description = "SpeedSync SFSE plugin for Starfield",
+        email = "litbeep@proton.me"
     })
 
     -- add src files
