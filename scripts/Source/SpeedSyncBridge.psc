@@ -5,7 +5,7 @@ Scriptname SpeedSyncBridge Native Hidden
 ; ------------------------------------------
 Function SetEscortTarget(Actor target) global native
 Actor Function GetEscortTarget() global native
-Function ClearInternalState(Float savedPenalty) global native
+Function ClearInternalState() global native
 Bool Function IsInMenuMode() global native
 
 ; ------------------------------------------
