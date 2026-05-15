@@ -1,7 +1,7 @@
 Scriptname SpeedSyncPlayerAlias extends ReferenceAlias
 Import CassiopeiaPapyrusExtender
 
-ActorValue Property SpeedSync_Penalty_AV Auto Const Mandatory
+ActorValue Property SpeedSyncPenaltyAV Auto Const Mandatory
 
 ; ------------------------------------------
 ; Events
@@ -17,6 +17,6 @@ Event OnPlayerLoadGame()
     Actor PlayerRef = Game.GetPlayer()
     
     ; If a speed penalty was active on save, pass to C++ to restore
-    Float penalty = PlayerRef.GetValue(SpeedSync_Penalty_AV)
+    Float penalty = PlayerRef.GetValue(SpeedSyncPenaltyAV)
     SpeedSyncBridge.ClearInternalState(penalty)
 EndEvent

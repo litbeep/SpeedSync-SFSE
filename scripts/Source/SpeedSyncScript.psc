@@ -43,7 +43,7 @@ Function ToggleFollow()
     Else
         ; Prevent starting while piloting/seated
         If PlayerRef.GetSitState() != 0
-            Debug.Notification("Speed Sync: Cannot be used while seated or piloting.")
+            Debug.Notification("SpeedSync cannot be started while seated or piloting.")
             Return
         EndIf
 
@@ -59,9 +59,9 @@ Function ToggleFollow()
             ; 2. Start the Papyrus Watcher Loop
             Self.StartTimer(0.5, 10)
             
-            Debug.Notification("Speed Sync: Locked onto " + GetReferenceName(target))
+            Debug.Notification("SpeedSync locked onto " + GetReferenceName(target))
         Else
-            Debug.Notification("Speed Sync: No valid NPC in crosshairs.")
+            Debug.Notification("SpeedSync found no valid NPC in crosshairs")
         EndIf
     EndIf
 EndFunction
@@ -77,7 +77,7 @@ Event OnTimer(Int aiTimerID)
         ; 1. Check Distance Break
         If currentTarget == None
             TargetedNPC.Clear()
-            Debug.Notification("Speed Sync: Broken (Too Far)")
+            Debug.Notification("SpeedSync stopped (Too Far)")
             Return
         EndIf
 
@@ -85,7 +85,7 @@ Event OnTimer(Int aiTimerID)
         If currentTarget.IsDead()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("Speed Sync: Broken (Target Died)")
+            Debug.Notification("SpeedSync stopped (Target Died)")
             Return 
         EndIf
 
@@ -93,7 +93,7 @@ Event OnTimer(Int aiTimerID)
         If PlayerRef.IsInCombat()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("Speed Sync: Broken (Combat Initiated)")
+            Debug.Notification("SpeedSync stopped (In Combat)")
             Return 
         EndIf
 
@@ -101,7 +101,7 @@ Event OnTimer(Int aiTimerID)
         If PlayerRef.IsSprinting()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("Speed Sync: Broken (Sprinting)")
+            Debug.Notification("SpeedSync stopped (Sprinting)")
             Return 
         EndIf
 
@@ -109,7 +109,7 @@ Event OnTimer(Int aiTimerID)
         If PlayerRef.GetSitState() != 0
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("Speed Sync: Broken (Piloting / Seated)")
+            Debug.Notification("SpeedSync stopped (Piloting/Seated)")
             Return 
         EndIf
 
@@ -136,6 +136,6 @@ Function StopFollowing(bool abNotifyPlayer = false)
     SpeedSyncBridge.SetEscortTarget(None)
     
     If abNotifyPlayer
-        Debug.Notification("Speed Sync: Disabled.")
+        Debug.Notification("SpeedSync stopped")
     EndIf
 EndFunction
