@@ -1,6 +1,8 @@
 Scriptname SpeedSyncPlayerAlias extends ReferenceAlias
 Import CassiopeiaPapyrusExtender
 
+ActorValue Property SpeedSyncPenaltyAV Auto Const Mandatory
+
 ; ------------------------------------------
 ; Events
 ; ------------------------------------------
@@ -12,6 +14,9 @@ Event OnPlayerLoadGame()
     ; Register input event listener
     RegisterForNativeEvent("SpeedSyncScript", "BSInputEvent")
 
-    ; Instantly clear the C++ tracking state
-    SpeedSyncBridge.ClearInternalState()
+    Actor PlayerRef = Game.GetPlayer()
+    
+    ; If a speed penalty was active on save, pass to C++ to restore
+    Float penalty = PlayerRef.GetValue(SpeedSyncPenaltyAV)
+    SpeedSyncBridge.ClearInternalState(penalty)
 EndEvent
