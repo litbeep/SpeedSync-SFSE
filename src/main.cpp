@@ -101,10 +101,23 @@ void ClearInternalState(std::monostate, float a_savedPenalty) {
                     auto penaltyForm = GetPenaltyForm();
 
                     if (avOwner && speedForm && penaltyForm) {
+                        // Check for and clean up legacy kTemporary modifiers
+                        float tempSpeedPenalty = avOwner->GetModifier(RE::ACTOR_VALUE_MODIFIER::kTemporary, *speedForm);
+                        if (std::abs(tempSpeedPenalty) > 0.001f) {
+                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *speedForm, -tempSpeedPenalty, player);
+                            REX::INFO("SpeedSync: Reverted a legacy temporary speed penalty of {}", tempSpeedPenalty);
+                        }
+                        
+                        float tempShadowPenalty = avOwner->GetModifier(RE::ACTOR_VALUE_MODIFIER::kTemporary, *penaltyForm);
+                        if (std::abs(tempShadowPenalty) > 0.001f) {
+                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *penaltyForm, -tempShadowPenalty, player);
+                            REX::INFO("SpeedSync: Reverted a legacy temporary shadow penalty of {}", tempShadowPenalty);
+                        }
+
                         // Add the positive penalty back to SpeedMult to restore normal speed
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *speedForm, a_savedPenalty, player);
+                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *speedForm, a_savedPenalty, player);
                         // Zero out the Penalty AV by subtracting itself
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *penaltyForm, -a_savedPenalty, player);
+                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *penaltyForm, -a_savedPenalty, player);
                         REX::INFO("SpeedSync: Reverted a loaded speed penalty of {}", a_savedPenalty);
                     }
                 }
@@ -170,8 +183,8 @@ private:
                         auto penaltyForm = GetPenaltyForm();
                         
                         if (avOwner && speedForm && penaltyForm) {
-                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *speedForm, diff, player);
-                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *penaltyForm, -diff, player);
+                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *speedForm, diff, player);
+                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *penaltyForm, -diff, player);
                         }
                     });
                 }
@@ -284,9 +297,9 @@ private:
                     
                     if (avOwner && sForm && pForm) {
                         // Mod actual speed
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *sForm, diff, player);
+                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *sForm, diff, player);
                         // Inverse diff to perfectly track the penalty for save games
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *pForm, -diff, player);
+                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *pForm, -diff, player);
                     }
                 });
             }
