@@ -23,5 +23,7 @@ Event OnPlayerLoadGame()
     Float penalty = PlayerRef.GetValue(SpeedSyncPenaltyAV)
     SpeedSyncBridge.ClearInternalState(penalty)
 
-    Debug.Notification("SpeedSync ready")
+    If QS
+        QS.SpeedSync_Msg_Ready.Show()
+    EndIf
 EndEvent

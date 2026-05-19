@@ -5,6 +5,15 @@ Import CassiopeiaPapyrusExtender
 ; Properties
 ; ------------------------------------------
 ReferenceAlias Property TargetedNPC Auto Const Mandatory
+Message Property SpeedSync_Msg_Ready Auto Const Mandatory
+Message Property SpeedSync_Msg_Seated Auto Const Mandatory
+Message Property SpeedSync_Msg_NoTarget Auto Const Mandatory
+Message Property SpeedSync_Msg_Stopped Auto Const Mandatory
+Message Property SpeedSync_Msg_TooFar Auto Const Mandatory
+Message Property SpeedSync_Msg_TargetDied Auto Const Mandatory
+Message Property SpeedSync_Msg_InCombat Auto Const Mandatory
+Message Property SpeedSync_Msg_Sprinting Auto Const Mandatory
+Message Property SpeedSync_Msg_PilotSeated Auto Const Mandatory
 
 ; ------------------------------------------
 ; Input Registration
@@ -29,7 +38,7 @@ Event OnQuestInit()
     SpeedSyncBridge.RefreshINISettings()
     Utility.Wait(1.0)
     RegisterInput()
-    Debug.Notification("SpeedSync ready")
+    SpeedSync_Msg_Ready.Show()
 EndEvent
 
 ; ------------------------------------------
@@ -65,7 +74,7 @@ Function ToggleFollow()
         StopFollowing(true)
     Else
         If PlayerRef.GetSitState() != 0
-            Debug.Notification("SpeedSync cannot start while seated or piloting")
+            SpeedSync_Msg_Seated.Show()
             Return
         EndIf
 
@@ -77,7 +86,7 @@ Function ToggleFollow()
             Self.StartTimer(0.5, 10)
             Debug.Notification("SpeedSync locked onto " + GetReferenceName(target))
         Else
-            Debug.Notification("SpeedSync found no valid NPC in crosshairs")
+            SpeedSync_Msg_NoTarget.Show()
         EndIf
     EndIf
 EndFunction
@@ -88,7 +97,7 @@ Function StopFollowing(bool abNotifyPlayer = false)
     SpeedSyncBridge.SetEscortTarget(None)
     
     If abNotifyPlayer
-        Debug.Notification("SpeedSync stopped")
+        SpeedSync_Msg_Stopped.Show()
     EndIf
 EndFunction
 
@@ -113,35 +122,35 @@ Event OnTimer(Int aiTimerID)
         
         If currentTarget == None
             TargetedNPC.Clear()
-            Debug.Notification("SpeedSync stopped (Too Far)")
+            SpeedSync_Msg_TooFar.Show()
             Return
         EndIf
 
         If currentTarget.IsDead()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("SpeedSync stopped (Target Died)")
+            SpeedSync_Msg_TargetDied.Show()
             Return 
         EndIf
 
         If PlayerRef.IsInCombat()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("SpeedSync stopped (In Combat)")
+            SpeedSync_Msg_InCombat.Show()
             Return 
         EndIf
 
         If PlayerRef.IsSprinting()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("SpeedSync stopped (Sprinting)")
+            SpeedSync_Msg_Sprinting.Show()
             Return 
         EndIf
 
         If PlayerRef.GetSitState() != 0
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
-            Debug.Notification("SpeedSync stopped (Piloting/Seated)")
+            SpeedSync_Msg_PilotSeated.Show()
             Return 
         EndIf
 
