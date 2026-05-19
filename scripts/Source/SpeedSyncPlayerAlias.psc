@@ -4,19 +4,24 @@ Import CassiopeiaPapyrusExtender
 ActorValue Property SpeedSyncPenaltyAV Auto Const Mandatory
 
 ; ------------------------------------------
-; Events
+; Save Load Handler
 ; ------------------------------------------
-
 Event OnPlayerLoadGame()
-    ; Reload settings from INI file
+    ; Wait for Cassiopeia's internal event wipe to finish
+    Utility.Wait(3.0)
+
     SpeedSyncBridge.RefreshINISettings()
 
-    ; Register input event listener
-    RegisterForNativeEvent("SpeedSyncScript", "BSInputEvent")
+    ; Delegate to the Quest script so the event binds to the correct instance
+    SpeedSyncScript QS = (GetOwningQuest() as SpeedSyncScript)
+    If QS
+        QS.ScheduleInputRegistration()
+    EndIf
 
+    ; Clear C++ state — speed restoration is handled by the permanent task
     Actor PlayerRef = Game.GetPlayer()
-    
-    ; If a speed penalty was active on save, pass to C++ to restore
     Float penalty = PlayerRef.GetValue(SpeedSyncPenaltyAV)
     SpeedSyncBridge.ClearInternalState(penalty)
+
+    Debug.Notification("SpeedSync ready")
 EndEvent

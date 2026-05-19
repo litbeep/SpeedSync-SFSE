@@ -7,16 +7,34 @@ Import CassiopeiaPapyrusExtender
 ReferenceAlias Property TargetedNPC Auto Const Mandatory
 
 ; ------------------------------------------
-; Initialization & Input
+; Input Registration
 ; ------------------------------------------
-Event OnQuestInit()
-    ; Read settings on brand new game or initial install
-    SpeedSyncBridge.RefreshINISettings()
-    
-    Utility.Wait(1.0)
+
+; Registers the BSInputEvent handler on this Quest script instance.
+; Must be called from the Quest context — calling from an Alias
+; would bind the event to the wrong script instance.
+Function RegisterInput()
     RegisterForNativeEvent("SpeedSyncScript", "BSInputEvent")
+EndFunction
+
+; Registers immediately, then queues a delayed retry to survive
+; Cassiopeia's async event wipe during quit-to-menu → load cycles.
+Function ScheduleInputRegistration()
+    RegisterInput()
+    Self.CancelTimer(99)
+    Self.StartTimer(5.0, 99)
+EndFunction
+
+Event OnQuestInit()
+    SpeedSyncBridge.RefreshINISettings()
+    Utility.Wait(1.0)
+    RegisterInput()
+    Debug.Notification("SpeedSync ready")
 EndEvent
 
+; ------------------------------------------
+; Input Handler (Cassiopeia BSInputEvent)
+; ------------------------------------------
 Function BSInputEvent(Int aiKeyCode, String asControlName, String asFriendlyName, bool bPressed, Float afHeldTime) global
     If SpeedSyncBridge.IsInMenuMode()
         Return
@@ -31,34 +49,32 @@ Function BSInputEvent(Int aiKeyCode, String asControlName, String asFriendlyName
 EndFunction
 
 ; ------------------------------------------
-; Core Logic
+; Toggle & Follow Logic
 ; ------------------------------------------
 Function ToggleFollow()
+    ; Restart the quest if it was shut down by a cleared alias on load
+    If !Self.IsRunning()
+        Self.Start()
+        Utility.Wait(0.1)
+    EndIf
+
     Actor PlayerRef = Game.GetPlayer()
-    Actor currentTarget = SpeedSyncBridge.GetEscortTarget() ; Ask C++ for the state
+    Actor currentTarget = SpeedSyncBridge.GetEscortTarget()
 
     If currentTarget != None
-        ; C++ is already tracking someone. The player wants to cancel it.
         StopFollowing(true)
     Else
-        ; Prevent starting while piloting/seated
         If PlayerRef.GetSitState() != 0
-            Debug.Notification("SpeedSync cannot be started while seated or piloting.")
+            Debug.Notification("SpeedSync cannot start while seated or piloting")
             Return
         EndIf
 
-        ; C++ is NOT tracking anyone. Let's start the sync.
         Actor target = GetCrosshairRef() as Actor
         
         If target && target != PlayerRef && !target.IsDead()
             TargetedNPC.ForceRefTo(target)
-            
-            ; 1. Tell C++ to start tracking
             SpeedSyncBridge.SetEscortTarget(target)
-            
-            ; 2. Start the Papyrus Watcher Loop
             Self.StartTimer(0.5, 10)
-            
             Debug.Notification("SpeedSync locked onto " + GetReferenceName(target))
         Else
             Debug.Notification("SpeedSync found no valid NPC in crosshairs")
@@ -66,22 +82,41 @@ Function ToggleFollow()
     EndIf
 EndFunction
 
+Function StopFollowing(bool abNotifyPlayer = false)
+    Self.CancelTimer(10)
+    TargetedNPC.Clear()
+    SpeedSyncBridge.SetEscortTarget(None)
+    
+    If abNotifyPlayer
+        Debug.Notification("SpeedSync stopped")
+    EndIf
+EndFunction
+
+Function ForceStopFollowing()
+    StopFollowing(true)
+EndFunction
+
 ; ------------------------------------------
-; Events
+; Timers
 ; ------------------------------------------
 Event OnTimer(Int aiTimerID)
+    ; Safety-net re-registration after save load
+    If aiTimerID == 99
+        RegisterInput()
+        Return
+    EndIf
+
+    ; Watcher loop — polls for break conditions while synced
     If aiTimerID == 10
         Actor PlayerRef = Game.GetPlayer()
         Actor currentTarget = SpeedSyncBridge.GetEscortTarget()
         
-        ; 1. Check Distance Break
         If currentTarget == None
             TargetedNPC.Clear()
             Debug.Notification("SpeedSync stopped (Too Far)")
             Return
         EndIf
 
-        ; 2. Check Target Death
         If currentTarget.IsDead()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
@@ -89,7 +124,6 @@ Event OnTimer(Int aiTimerID)
             Return 
         EndIf
 
-        ; 3. Check Player Combat State
         If PlayerRef.IsInCombat()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
@@ -97,7 +131,6 @@ Event OnTimer(Int aiTimerID)
             Return 
         EndIf
 
-        ; 4. Check Player Sprint State
         If PlayerRef.IsSprinting()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
@@ -105,7 +138,6 @@ Event OnTimer(Int aiTimerID)
             Return 
         EndIf
 
-        ; 5. Check Seated/Piloting State
         If PlayerRef.GetSitState() != 0
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
@@ -113,29 +145,6 @@ Event OnTimer(Int aiTimerID)
             Return 
         EndIf
 
-        ; 6. Loop Timer
         Self.StartTimer(0.5, 10)
     EndIf
 EndEvent
-
-; ------------------------------------------
-; Helper Functions
-; ------------------------------------------
-Function ForceStopFollowing()
-    StopFollowing(true)
-EndFunction
-
-Function StopFollowing(bool abNotifyPlayer = false)
-    ; 1. Kill the Watcher Loop so it stops polling
-    Self.CancelTimer(10)
-    
-    ; 2. Clear the Papyrus Alias
-    TargetedNPC.Clear()
-    
-    ; 3. Tell C++ to clear its target
-    SpeedSyncBridge.SetEscortTarget(None)
-    
-    If abNotifyPlayer
-        Debug.Notification("SpeedSync stopped")
-    EndIf
-EndFunction

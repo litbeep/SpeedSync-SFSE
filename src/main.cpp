@@ -7,54 +7,78 @@
 #include <chrono>
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 
-// Windows & Platform Includes
 #define NOMINMAX
 #include <Windows.h>
 #include <string>
 
 // ==============================================================================
-// 1. Global state
+// 1. Global State
 // ==============================================================================
-static_assert(std::atomic<RE::Actor*>::is_always_lock_free, "Atomic operations must be lock-free");
-std::atomic<RE::Actor*> g_TargetNPC{nullptr};
+std::atomic<uint32_t> g_TargetNPC{0};
+std::atomic<uint32_t> g_PenaltyFormID{0};
+
 std::atomic<float> g_CurrentSpeedMod{0.0f};
 std::atomic<float> g_LastPushedSpeedMod{0.0f};
+std::atomic<bool> g_IsRestoringPenalty{false};
 int g_HotkeyVK = 78;
 
+// Tracks which VM instance we last bound to. When the player quits to menu
+// and loads a save, the VM is rebuilt but kPostDataLoad won't fire again.
+std::atomic<RE::BSScript::IVirtualMachine*> g_LastBoundVM{nullptr};
+
 // ==============================================================================
-// 2. Form caching
+// 2. Form Lookups
 // ==============================================================================
+// All accessors resolve fresh each call — no form pointers are cached across
+// frames. Forms are invalidated on game reload (load-order changes, ForceReset).
+
 RE::ActorValueInfo* GetSpeedForm() {
-    static RE::ActorValueInfo* cachedForm = nullptr;
-    if (!cachedForm) {
-        cachedForm = RE::ActorValue::GetSingleton()->speedMult;
+    if (const auto avs = RE::ActorValue::GetSingleton()) {
+        return avs->speedMult;
     }
-    return cachedForm;
+    return nullptr;
 }
 
 RE::ActorValueInfo* GetPenaltyForm() {
-    static RE::ActorValueInfo* cachedForm = nullptr;
-    if (!cachedForm) {
-        cachedForm = RE::TESForm::LookupByEditorID<RE::ActorValueInfo>("SpeedSyncPenaltyAV");
+    uint32_t currentID = g_PenaltyFormID.load();
+    RE::ActorValueInfo* form = nullptr;
+
+    if (currentID != 0) {
+        form = RE::TESForm::LookupByID<RE::ActorValueInfo>(currentID);
     }
-    return cachedForm;
+
+    // Fallback: resolve by EditorID and cache the FormID for subsequent lookups
+    if (!form) {
+        form = RE::TESForm::LookupByEditorID<RE::ActorValueInfo>("SpeedSyncPenaltyAV");
+        if (form) {
+            g_PenaltyFormID.store(form->GetFormID());
+        }
+    }
+    
+    return form;
 }
 
 // ==============================================================================
-// 3. Papyrus native functions
+// 3. Papyrus Native Functions
 // ==============================================================================
 void SetEscortTarget(std::monostate, RE::Actor* a_target) {
-    g_TargetNPC.store(a_target);
     if (a_target) {
-        REX::INFO("SpeedSync: Escort target set to: {:X}", a_target->GetFormID());
+        g_TargetNPC.store(a_target->GetFormID());
+        REX::INFO("SpeedSync: Escort target set to {:X}", a_target->GetFormID());
     } else {
-        REX::INFO("SpeedSync: Escort target cleared.");
+        g_TargetNPC.store(0);
+        REX::INFO("SpeedSync: Escort target cleared");
     }
 }
 
 RE::Actor* GetEscortTarget(std::monostate) {
-    return g_TargetNPC.load();
+    uint32_t id = g_TargetNPC.load();
+    if (id != 0) {
+        return RE::TESForm::LookupByID<RE::Actor>(id);
+    }
+    return nullptr;
 }
 
 bool IsInMenuMode(std::monostate) {
@@ -64,8 +88,6 @@ bool IsInMenuMode(std::monostate) {
     }
 
     if (const auto ui = RE::UI::GetSingleton()) {
-        // Fallback checks for menus that may not strictly pause the background game 
-        // world but should still be treated as "Menu Mode" for hotkeys/logic.
         if (ui->IsMenuOpen("Console") || ui->IsMenuOpen("DialogueMenu")) {
             isPaused = true;
         }
@@ -74,62 +96,24 @@ bool IsInMenuMode(std::monostate) {
     return isPaused;
 }
 
-// Native INI reader to extract and cache the hotkey virtual key code
 void RefreshINISettings(std::monostate) {
     std::string relPath = "Data\\SFSE\\Plugins\\SpeedSync.ini";
     char absPath[MAX_PATH];
     GetFullPathNameA(relPath.c_str(), MAX_PATH, absPath, nullptr);
     
     g_HotkeyVK = GetPrivateProfileIntA("Settings", "Hotkey", 78, absPath);
-    REX::INFO("SpeedSync: Cached Hotkey VK {}", g_HotkeyVK);
+    REX::INFO("SpeedSync: Hotkey VK = {}", g_HotkeyVK);
 }
 
-// Evaluates the keypress natively using the cached hotkey
 bool IsSyncHotkey(std::monostate, int a_keyCode) {
     return a_keyCode == g_HotkeyVK;
 }
 
-// Handles cleanup on load, and restores the SpeedMult via the Shadow AV penalty float
-void ClearInternalState(std::monostate, float a_savedPenalty) {
-    if (std::abs(a_savedPenalty) > 0.001f) {
-        if (const auto task = SFSE::GetTaskInterface()) {
-            task->AddTask([a_savedPenalty]() {
-                auto player = RE::PlayerCharacter::GetSingleton();
-                if (player) {
-                    auto avOwner = static_cast<RE::ActorValueOwner*>(player);
-                    auto speedForm = GetSpeedForm();
-                    auto penaltyForm = GetPenaltyForm();
-
-                    if (avOwner && speedForm && penaltyForm) {
-                        // Check for and clean up legacy kTemporary modifiers
-                        float tempSpeedPenalty = avOwner->GetModifier(RE::ACTOR_VALUE_MODIFIER::kTemporary, *speedForm);
-                        if (std::abs(tempSpeedPenalty) > 0.001f) {
-                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *speedForm, -tempSpeedPenalty, player);
-                            REX::INFO("SpeedSync: Reverted a legacy temporary speed penalty of {}", tempSpeedPenalty);
-                        }
-                        
-                        float tempShadowPenalty = avOwner->GetModifier(RE::ACTOR_VALUE_MODIFIER::kTemporary, *penaltyForm);
-                        if (std::abs(tempShadowPenalty) > 0.001f) {
-                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kTemporary, *penaltyForm, -tempShadowPenalty, player);
-                            REX::INFO("SpeedSync: Reverted a legacy temporary shadow penalty of {}", tempShadowPenalty);
-                        }
-
-                        // Add the positive penalty back to SpeedMult to restore normal speed
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *speedForm, a_savedPenalty, player);
-                        // Zero out the Penalty AV by subtracting itself
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *penaltyForm, -a_savedPenalty, player);
-                        REX::INFO("SpeedSync: Reverted a loaded speed penalty of {}", a_savedPenalty);
-                    }
-                }
-            });
-        }
-    }
-
-    // Wipe tracking pointers to start fresh
-    g_TargetNPC.store(nullptr);
+void ClearInternalState(std::monostate, float) {
+    // Speed restoration is handled by the permanent task's self-healing logic
+    g_TargetNPC.store(0);
     g_CurrentSpeedMod.store(0.0f);
     g_LastPushedSpeedMod.store(0.0f);
-    REX::INFO("SpeedSync internal state cleared by Papyrus on load.");
 }
 
 bool BindPapyrus(RE::BSScript::IVirtualMachine* a_vm) {
@@ -137,16 +121,28 @@ bool BindPapyrus(RE::BSScript::IVirtualMachine* a_vm) {
     a_vm->BindNativeMethod("SpeedSyncBridge", "GetEscortTarget", GetEscortTarget, std::optional<bool>(), false);
     a_vm->BindNativeMethod("SpeedSyncBridge", "ClearInternalState", ClearInternalState, std::optional<bool>(), false);
     a_vm->BindNativeMethod("SpeedSyncBridge", "IsInMenuMode", IsInMenuMode, std::optional<bool>(), false);
-    
     a_vm->BindNativeMethod("SpeedSyncBridge", "RefreshINISettings", RefreshINISettings, std::optional<bool>(), false);
     a_vm->BindNativeMethod("SpeedSyncBridge", "IsSyncHotkey", IsSyncHotkey, std::optional<bool>(), false);
     
-    REX::INFO("Registered Papyrus functions.");
+    g_LastBoundVM.store(a_vm);
+    REX::INFO("SpeedSync: Papyrus native functions bound");
     return true;
 }
 
+// Detects VM rebuilds (quit-to-menu → load) and re-binds native functions
+void EnsurePapyrusBound() {
+    auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+    if (vm && vm != g_LastBoundVM.load()) {
+        REX::INFO("SpeedSync: Detected new VM, re-binding native functions");
+        BindPapyrus(vm);
+        
+        // Forms are invalidated on reload — force fresh EditorID lookup
+        g_PenaltyFormID.store(0);
+    }
+}
+
 // ==============================================================================
-// 4. Engine hook task
+// 4. Per-Frame Update Task
 // ==============================================================================
 class PlayerUpdateHook
 {
@@ -155,9 +151,9 @@ public:
     {
         if (const auto task = SFSE::GetTaskInterface()) {
             task->AddPermanentTask(UpdatePlayer);
-            REX::INFO("Installed Permanent Task hook for per-frame execution.");
+            REX::INFO("SpeedSync: Permanent task installed");
         } else {
-            REX::INFO("Failed to get Task interface!");
+            REX::INFO("SpeedSync: Failed to get Task interface!");
         }
     }
 
@@ -166,70 +162,128 @@ private:
     {
         static uint32_t frameCount = 0;
 
+        // -- Safety Gates --
+
+        // Halt during loading/fade transitions
+        if (const auto ui = RE::UI::GetSingleton()) {
+            if (ui->IsMenuOpen("LoadingMenu") || ui->IsMenuOpen("FaderMenu")) {
+                g_TargetNPC.store(0);
+                g_CurrentSpeedMod.store(0.0f);
+                g_LastPushedSpeedMod.store(0.0f);
+                return;
+            }
+        }
+
         auto a_player = RE::PlayerCharacter::GetSingleton();
-        RE::Actor* currentTarget = g_TargetNPC.load();
         
-        // Ensure speed is reverted properly using dual-AV logic if the target is invalid
+        // No player = not in gameplay (main menu, etc.)
+        if (!a_player) {
+            g_TargetNPC.store(0);
+            g_CurrentSpeedMod.store(0.0f);
+            g_LastPushedSpeedMod.store(0.0f);
+            return;
+        }
+        
+        // Re-bind native functions if the VM was rebuilt
+        EnsurePapyrusBound();
+
+        // Pause during game menus (inventory, map) without wiping state
+        if (const auto main = RE::Main::GetSingleton(); main && main->isGameMenuPaused) return;
+
+        // -- Core Logic --
+        uint32_t targetID = g_TargetNPC.load();
+        RE::Actor* currentTarget = (targetID != 0) ? RE::TESForm::LookupByID<RE::Actor>(targetID) : nullptr;
+        
+        auto avOwner = static_cast<RE::ActorValueOwner*>(a_player);
+        auto speedForm = GetSpeedForm();
+        auto penaltyForm = GetPenaltyForm();
+
+        // -- Self-Healing --
+        // Reverts speed if target was lost or a save loaded with an orphaned penalty
         if (!currentTarget || currentTarget->IsDead()) {
+            
             float lastPushed = g_LastPushedSpeedMod.load();
+            
+            // Active session: undo the last speed modification we applied
             if (std::abs(lastPushed) > 0.001f) {
-                float diff = -lastPushed; // Invert to restore base speed
+                float diff = -lastPushed;
                 if (const auto task = SFSE::GetTaskInterface()) {
                     task->AddTask([diff]() {
                         auto player = RE::PlayerCharacter::GetSingleton();
                         if (!player) return;
-                        auto avOwner = static_cast<RE::ActorValueOwner*>(player);
-                        auto speedForm = GetSpeedForm();
-                        auto penaltyForm = GetPenaltyForm();
+                        auto avO = static_cast<RE::ActorValueOwner*>(player);
+                        auto sF = GetSpeedForm();
+                        auto pF = GetPenaltyForm();
                         
-                        if (avOwner && speedForm && penaltyForm) {
-                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *speedForm, diff, player);
-                            avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *penaltyForm, -diff, player);
+                        if (avO && sF && pF) {
+                            avO->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *sF, diff, player);
+                            avO->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *pF, -diff, player);
                         }
                     });
                 }
                 g_LastPushedSpeedMod.store(0.0f);
                 g_CurrentSpeedMod.store(0.0f);
             }
+            // Orphaned penalty from a save file: invert and clear it
+            else if (avOwner && penaltyForm && speedForm) {
+                float orphanedPenalty = avOwner->GetActorValue(*penaltyForm);
+                if (std::abs(orphanedPenalty) > 0.001f && !g_IsRestoringPenalty.load()) {
+                    g_IsRestoringPenalty.store(true);
+                    
+                    if (const auto task = SFSE::GetTaskInterface()) {
+                        task->AddTask([orphanedPenalty]() {
+                            auto player = RE::PlayerCharacter::GetSingleton();
+                            if (player) {
+                                auto avO = static_cast<RE::ActorValueOwner*>(player);
+                                auto sF = GetSpeedForm();
+                                auto pF = GetPenaltyForm();
+                                if (avO && sF && pF) {
+                                    avO->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *sF, orphanedPenalty, player);
+                                    avO->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *pF, -orphanedPenalty, player);
+                                }
+                            }
+                            g_IsRestoringPenalty.store(false);
+                        });
+                    }
+                }
+            }
+            
+            g_TargetNPC.store(0);
             return;
         }
 
-        if (!a_player) return;
-
-        // Throttle execution for ~30Hz smooth interpolation (User Baseline)
+        // -- Follow Speed Math (runs every 2nd frame) --
         if (++frameCount < 2) return; 
         frameCount = 0;
 
         RE::NiPoint3 playerPos = a_player->GetPosition();
         RE::NiPoint3 targetPos = currentTarget->GetPosition();
 
-        // Restored 3D Distance computation
         float dx = playerPos.x - targetPos.x;
         float dy = playerPos.y - targetPos.y;
         float dz = playerPos.z - targetPos.z;
         float distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
 
-        // Break the sync if the player exceeds the distance leash
+        // Break sync if too far
         if (distanceSq > 225.0f) {
-            g_TargetNPC.store(nullptr);
+            g_TargetNPC.store(0);
             return;
         }
 
         float distance = 0.0f;
         constexpr float closeRangeSq = 4.0f;
         
-        // Defer expensive sqrt calculation unless the player is inside the active braking zone
         if (distanceSq < closeRangeSq) {
             distance = std::sqrt(distanceSq);
         }
 
+        // Track target movement delta
         static RE::NiPoint3 lastTargetPos = targetPos;
-        static RE::Actor* lastTrackedNPC = nullptr;
+        static uint32_t lastTrackedNPC = 0;
         
-        // Wipe stale position data if the player switched targets
-        if (currentTarget != lastTrackedNPC) {
+        if (targetID != lastTrackedNPC) {
             lastTargetPos = targetPos;
-            lastTrackedNPC = currentTarget;
+            lastTrackedNPC = targetID;
         }
 
         float tx = targetPos.x - lastTargetPos.x;
@@ -237,53 +291,35 @@ private:
         float targetSpeedSq = (tx * tx) + (ty * ty);
         lastTargetPos = targetPos;
 
-        // Dynamic base speed profile calculation
-        auto avOwner = static_cast<RE::ActorValueOwner*>(a_player);
-        auto speedForm = GetSpeedForm();
-        auto penaltyForm = GetPenaltyForm(); // Fetch the Shadow AV
-        
+        // Calculate speed modifier
         float currentMod = g_CurrentSpeedMod.load();
-        
-        // Get total current speed; default to 100.0 if lookup fails
         float currentTotalSpeed = (avOwner && speedForm) ? avOwner->GetActorValue(*speedForm) : 100.0f;
-        
-        // Get the exact penalty currently applied by the engine's task queue
         float currentEnginePenalty = (avOwner && penaltyForm) ? avOwner->GetActorValue(*penaltyForm) : 0.0f;
-        
-        // True speed is simply the current speed + the tracked penalty
-        // Isolates our math from any delays in the SFSE task queue
         float trueBaseSpeed = currentTotalSpeed + currentEnginePenalty;
         
-        // Define the exact speed we want the player to drop to when fully braked
         float desiredMinSpeed = 20.0f; 
-        
-        // Dynamically calculate the maximum penalty required to hit that minimum speed
         float maxPenalty = desiredMinSpeed - trueBaseSpeed; 
-        maxPenalty = std::min(maxPenalty, 0.0f); // Safety: ensure we never apply a positive speed buff
+        maxPenalty = std::min(maxPenalty, 0.0f); 
 
-        // Proportional smoothing logic based on target distance and state
         float targetSpeedMod = 0.0f;
 
         if (targetSpeedSq < 0.001f && distanceSq < closeRangeSq) {
-            // NPC is fully stopped and we are right behind them -> Slam brakes to dynamic penalty
             targetSpeedMod = maxPenalty;
         } else {
             if (distanceSq < closeRangeSq) {
-                // Scale negatively based on closeness (capped at our dynamic max penalty)
                 targetSpeedMod = std::max((distance - 2.0f) * 30.0f, maxPenalty);
             } else {
-                // In the pocket or trailing -> limit to base speed (0.0 penalty)
                 targetSpeedMod = 0.0f;
             }
         }
         
-        // Interpolate smoothly toward the target speed Mod (acts like a damped spring)
+        // Smooth interpolation
         currentMod += (targetSpeedMod - currentMod) * 0.15f;
         currentMod = std::clamp(currentMod, maxPenalty, 0.0f);
 
         g_CurrentSpeedMod.store(currentMod);
 
-        // Throttle engine updates by applying dual-AV logic only when the diff is > 0.5%
+        // Push to engine when change exceeds threshold
         float lastPushed = g_LastPushedSpeedMod.load();
         if (std::abs(currentMod - lastPushed) > 0.5f) {
             float diff = currentMod - lastPushed;
@@ -291,15 +327,13 @@ private:
                 task->AddTask([diff]() {
                     auto player = RE::PlayerCharacter::GetSingleton();
                     if (!player) return;
-                    auto avOwner = static_cast<RE::ActorValueOwner*>(player);
+                    auto avO = static_cast<RE::ActorValueOwner*>(player);
                     auto sForm = GetSpeedForm();
                     auto pForm = GetPenaltyForm();
                     
-                    if (avOwner && sForm && pForm) {
-                        // Mod actual speed
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *sForm, diff, player);
-                        // Inverse diff to perfectly track the penalty for save games
-                        avOwner->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *pForm, -diff, player);
+                    if (avO && sForm && pForm) {
+                        avO->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *sForm, diff, player);
+                        avO->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kPermanent, *pForm, -diff, player);
                     }
                 });
             }
@@ -308,6 +342,9 @@ private:
     }
 };
 
+// ==============================================================================
+// 5. Plugin Entry Points
+// ==============================================================================
 void MessageHandler(SFSE::MessagingInterface::Message* a_msg)
 {
     switch (a_msg->type) {
@@ -318,11 +355,16 @@ void MessageHandler(SFSE::MessagingInterface::Message* a_msg)
         }
     case SFSE::MessagingInterface::kPostDataLoad:
         {
-            // Try to bind Papyrus methods once the engine establishes the VM
             if (auto vm = RE::BSScript::Internal::VirtualMachine::GetSingleton()) {
                 BindPapyrus(vm);
             } else {
-                REX::INFO("Failed to bind Papyrus, VM not ready in kPostDataLoad.");
+                REX::INFO("SpeedSync: VM not ready in kPostDataLoad");
+            }
+            
+            // Pre-cache the PenaltyAV FormID for faster lookups
+            if (auto pForm = RE::TESForm::LookupByEditorID<RE::ActorValueInfo>("SpeedSyncPenaltyAV")) {
+                g_PenaltyFormID.store(pForm->GetFormID());
+                REX::INFO("SpeedSync: Pre-cached PenaltyAV FormID");
             }
             break;
         }
@@ -341,13 +383,12 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
     SFSE::Init(a_sfse);
     
-    REX::INFO("SpeedSyncSFSE plugin loaded");
+    REX::INFO("SpeedSync SFSE plugin loaded");
 
-    // Register Messaging interface for Task Hooking and Papyrus initialization post-load
     if (const auto messaging = SFSE::GetMessagingInterface()) {
         messaging->RegisterListener(MessageHandler);
     } else {
-        REX::INFO("Failed to get Messaging interface!");
+        REX::INFO("SpeedSync: Failed to get Messaging interface!");
     }
 
     return true;
