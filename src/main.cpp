@@ -22,6 +22,8 @@ std::atomic<uint32_t> g_PenaltyFormID{0};
 std::atomic<float> g_CurrentSpeedMod{0.0f};
 std::atomic<float> g_LastPushedSpeedMod{0.0f};
 std::atomic<bool> g_IsRestoringPenalty{false};
+std::atomic<bool> g_EnableCatchUp{false};
+std::atomic<bool> g_SprintBreaksSync{true};
 int g_HotkeyVK = 78;
 
 // Tracks which VM instance we last bound to. When the player quits to menu
@@ -102,11 +104,17 @@ void RefreshINISettings(std::monostate) {
     GetFullPathNameA(relPath.c_str(), MAX_PATH, absPath, nullptr);
     
     g_HotkeyVK = GetPrivateProfileIntA("Settings", "Hotkey", 78, absPath);
-    REX::INFO("SpeedSync: Hotkey VK = {}", g_HotkeyVK);
+    g_EnableCatchUp.store(GetPrivateProfileIntA("Settings", "EnableCatchUp", 0, absPath) != 0);
+    g_SprintBreaksSync.store(GetPrivateProfileIntA("Settings", "SprintBreaksSync", 1, absPath) != 0);
+    REX::INFO("SpeedSync: Hotkey VK = {}, EnableCatchUp = {}, SprintBreaksSync = {}", g_HotkeyVK, g_EnableCatchUp.load(), g_SprintBreaksSync.load());
 }
 
 bool IsSyncHotkey(std::monostate, int a_keyCode) {
     return a_keyCode == g_HotkeyVK;
+}
+
+bool GetSprintBreaksSync(std::monostate) {
+    return g_SprintBreaksSync.load();
 }
 
 void ClearInternalState(std::monostate, float) {
@@ -123,6 +131,7 @@ bool BindPapyrus(RE::BSScript::IVirtualMachine* a_vm) {
     a_vm->BindNativeMethod("SpeedSyncBridge", "IsInMenuMode", IsInMenuMode, std::optional<bool>(), false);
     a_vm->BindNativeMethod("SpeedSyncBridge", "RefreshINISettings", RefreshINISettings, std::optional<bool>(), false);
     a_vm->BindNativeMethod("SpeedSyncBridge", "IsSyncHotkey", IsSyncHotkey, std::optional<bool>(), false);
+    a_vm->BindNativeMethod("SpeedSyncBridge", "GetSprintBreaksSync", GetSprintBreaksSync, std::optional<bool>(), false);
     
     g_LastBoundVM.store(a_vm);
     REX::INFO("SpeedSync: Papyrus native functions bound");
@@ -264,18 +273,13 @@ private:
         float dz = playerPos.z - targetPos.z;
         float distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
 
-        // Break sync if too far
-        if (distanceSq > 225.0f) {
+        // Break sync if too far (increased leash distance to 25.0m)
+        if (distanceSq > 625.0f) {
             g_TargetNPC.store(0);
             return;
         }
 
-        float distance = 0.0f;
-        constexpr float closeRangeSq = 4.0f;
-        
-        if (distanceSq < closeRangeSq) {
-            distance = std::sqrt(distanceSq);
-        }
+        float distance = std::sqrt(distanceSq);
 
         // Track target movement delta
         static RE::NiPoint3 lastTargetPos = targetPos;
@@ -301,21 +305,24 @@ private:
         float maxPenalty = desiredMinSpeed - trueBaseSpeed; 
         maxPenalty = std::min(maxPenalty, 0.0f); 
 
+        float maxBonus = g_EnableCatchUp.load() ? 30.0f : 0.0f;
         float targetSpeedMod = 0.0f;
 
-        if (targetSpeedSq < 0.001f && distanceSq < closeRangeSq) {
+        if (targetSpeedSq < 0.001f && distance < 2.0f) {
             targetSpeedMod = maxPenalty;
         } else {
-            if (distanceSq < closeRangeSq) {
+            if (distance < 2.0f) {
                 targetSpeedMod = std::max((distance - 2.0f) * 30.0f, maxPenalty);
             } else {
-                targetSpeedMod = 0.0f;
+                // Slope: hits 30% bonus at 15.0m distance -> 30.0 / (15.0 - 2.0) = 30.0 / 13.0
+                float catchUpBonus = (distance - 2.0f) * (30.0f / 13.0f);
+                targetSpeedMod = std::min(catchUpBonus, maxBonus);
             }
         }
         
         // Smooth interpolation
         currentMod += (targetSpeedMod - currentMod) * 0.15f;
-        currentMod = std::clamp(currentMod, maxPenalty, 0.0f);
+        currentMod = std::clamp(currentMod, maxPenalty, maxBonus);
 
         g_CurrentSpeedMod.store(currentMod);
 

@@ -140,7 +140,7 @@ Event OnTimer(Int aiTimerID)
             Return 
         EndIf
 
-        If PlayerRef.IsSprinting()
+        If SpeedSyncBridge.GetSprintBreaksSync() && PlayerRef.IsSprinting()
             TargetedNPC.Clear()
             SpeedSyncBridge.SetEscortTarget(None)
             SpeedSync_Msg_Sprinting.Show()
